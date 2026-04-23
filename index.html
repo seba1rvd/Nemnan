@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Читалка V5.4 — Постраничное листание и нумерация</title>
+    
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/epubjs/dist/epub.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/2.1.10/vue.min.js"></script>
+    
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Inter', sans-serif; background: #F3F4F6; height: 100vh; overflow: hidden; }
+        #app { display: flex; height: 100vh; width: 100%; }
+        
+        /* Сайдбар */
+        .sidebar { width: 300px; background: #FFFFFF; border-right: 1px solid #E5E7EB; padding: 24px; display: flex; flex-direction: column; flex-shrink: 0; }
+        .file-input-label { display: block; width: 100%; padding: 12px; background: #111827; color: #fff; text-align: center; border-radius: 10px; cursor: pointer; font-weight: 600; font-size: 14px; }
+        #bookInput { display: none; }
+        .book-list { flex-grow: 1; overflow-y: auto; margin-top: 10px; }
+        .book-item { padding: 12px; border-radius: 10px; cursor: pointer; background: #F9FAFB; margin-bottom: 8px; font-size: 13px; }
+        .book-item.active { background: #E5E7EB; font-weight: 600; }
+
+        /* Основная область */
+        .main { flex-grow: 1; display: flex; flex-direction: column; position: relative; overflow: hidden; }
+        .reader-viewport { flex: 1; display: flex; justify-content: center; padding: 20px; overflow: hidden; }
+        /* УВЕЛИЧЕНА ШИРИНА КОНТЕЙНЕРА (было 850px, стало 1300px) */
+        .reader-container { width: 100%; max-width: 1300px; height: 100%; background: #FFFFFF; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); position: relative; overflow: hidden; }
+
+        /* Контейнеры */
+        #epub-area { width: 100%; height: 100%; }
+        
+        .fb2-area {
+            width: 100%; height: 100%;
+            padding: 40px 60px; line-height: 1.7; font-size: 18px; color: #374151;
+            column-width: 500px; /* Адаптивная ширина колонки для FB2 */
+            column-gap: 120px;
+            overflow-x: auto;
+            scroll-behavior: smooth;
+        }
+        .fb2-area h2 { text-align: center; margin: 30px 0; }
+        .fb2-area p { margin-bottom: 15px; text-indent: 1.5em; }
+
+        /* Навигация */
+        .controls { height: 80px; background: #FFFFFF; border-top: 1px solid #E5E7EB; display: flex; justify-content: center; align-items: center; gap: 20px; flex-shrink: 0; }
+        .nav-btn { padding: 10px 20px; background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 10px; cursor: pointer; font-weight: 600; transition: background 0.2s; }
+        .nav-btn:hover { background: #F9FAFB; }
+        
+        /* Поле ввода страницы */
+        .page-info { display: flex; align-items: center; gap: 8px; font-size: 15px; color: #4B5563; font-weight: 500; }
+        .page-input { width: 60px; padding: 8px; text-align: center; border: 1px solid #D1D5DB; border-radius: 8px; font-family: inherit; font-size: 14px; outline: none; }
+        .page-input:focus { border-color: #111827; }
+
+        .loader { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.9); display: flex; align-items: center; justify-content: center; z-index: 20; font-weight: 500; }
+    </style>
+</head>
+<body>
+
+<div id="app">
+    <div class="sidebar">
+        <h2 style="margin-bottom: 15px;">Мои книги</h2>
+        <label class="file-input-label">+ Загрузить книгу <input type="file" id="bookInput" @change="uploadBook" accept=".epub,.fb2,.zip"></label>
+        <div class="book-list">
+            <div v-for="book in books" class="book-item" :class="{ active: currentBookName === book }" @click="openBook(book)">{{ book }}</div>
+        </div>
+    </div>
+
+    <div class="main">
+        <div v-if="loadingStatus" class="loader">{{ loadingStatus }}</div>
+        <div class="reader-viewport">
+            <div class="reader-container">
+                <div id="epub-area" v-show="isEpub"></div>
+                <div v-if="!isEpub && fb2HTML" class="fb2-area" v-html="fb2HTML" id="fb2-view"></div>
+            </div>
+        </div>
+
+        <div class="controls" v-show="currentBookName">
+            <button class="nav-btn" @click="prev">← Назад</button>
+            
+            <div class="page-info">
+                <input type="number" class="page-input" v-model.number="pageInput" @change="goToPage" @keyup.enter="goToPage" min="1" :max="totalPages">
+                <span>из {{ totalPages }}</span>
+            </div>
+
+            <button class="nav-btn" @click="next">Вперед →</button>
+        </div>
+    </div>
+</div>
+
+<script>
+new Vue({
+    el: '#app',
+    data: {
+        books: [],
+        currentBookName: null,
+        loadingStatus: null,
+        isEpub: false,
+        fb2HTML: '',
+        
+        // Данные для нумерации
+        currentPage: 1,
+        totalPages: 1,
+        pageInput: 1
+    },
+    mounted: function() { 
+        this.fetchList(); 
+        // Обновляем количество страниц FB2 при изменении размера окна
+        window.addEventListener('resize', this.handleResize);
+    },
+    beforeDestroy: function() {
+        window.removeEventListener('resize', this.handleResize);
+    },
+    methods: {
+        fetchList: function() {
+            var self = this;
+            fetch('list.php?t=' + Date.now()).then(r => r.json()).then(d => { self.books = d; });
+        },
+        uploadBook: function(e) {
+            var self = this;
+            var file = e.target.files[0];
+            if (!file) return;
+            this.loadingStatus = 'Загрузка...';
+            var fd = new FormData(); fd.append('book', file);
+            fetch('upload.php', { method: 'POST', body: fd }).then(r => r.json()).then(res => {
+                self.loadingStatus = null;
+                if (res.status === 'success') self.fetchList();
+            });
+        },
+        openBook: function(name) {
+            this.currentBookName = name;
+            this.loadingStatus = 'Открываю...';
+            this.fb2HTML = '';
+            this.currentPage = 1;
+            this.totalPages = 1;
+            this.pageInput = 1;
+
+            var ext = name.toLowerCase().split('.').pop();
+            this.isEpub = (ext === 'epub');
+            
+            if (this.rendition) { this.rendition.destroy(); this.rendition = null; }
+            document.getElementById('epub-area').innerHTML = '';
+
+            if (this.isEpub) this.initEpub(name);
+            else this.initFb2(name, ext);
+        },
+        initEpub: function(name) {
+            var self = this;
+            this.bookObj = ePub('./uploads/' + name);
+            this.rendition = this.bookObj.renderTo("epub-area", { width: "100%", height: "100%", flow: "paginated" });
+            
+            this.rendition.display().then(() => { 
+                self.loadingStatus = 'Генерация страниц...';
+                // Генерируем локации для точного подсчета страниц
+                return self.bookObj.locations.generate(1024);
+            }).then(() => {
+                self.totalPages = self.bookObj.locations.length() || 1;
+                self.loadingStatus = null;
+            });
+
+            // Отслеживаем перелистывание
+            this.rendition.on('relocated', function(location) {
+                if (self.bookObj.locations.length()) {
+                    let percent = self.bookObj.locations.percentageFromCfi(location.start.cfi);
+                    self.currentPage = Math.max(1, Math.ceil(percent * self.totalPages));
+                    if (self.currentPage > self.totalPages) self.currentPage = self.totalPages;
+                    self.pageInput = self.currentPage;
+                }
+            });
+        },
+        initFb2: function(name, ext) {
+            var self = this;
+            fetch('./uploads/' + name).then(r => r.arrayBuffer()).then(buffer => {
+                if (ext === 'zip') {
+                    return JSZip.loadAsync(buffer).then(zip => {
+                        var f = Object.keys(zip.files).find(n => n.toLowerCase().endsWith('.fb2'));
+                        return zip.files[f].async("arraybuffer");
+                    });
+                }
+                return buffer;
+            }).then(buffer => {
+                var text = new TextDecoder("utf-8").decode(buffer);
+                var parser = new DOMParser();
+                var xml = parser.parseFromString(text, "text/xml");
+                var body = xml.querySelector("body") || xml.documentElement;
+                self.fb2HTML = body.innerHTML.replace(/<section/gi, '<div').replace(/<\/section/gi, '</div>');
+                self.loadingStatus = null;
+                
+                // Рассчитываем страницы после рендера HTML
+                self.$nextTick(() => {
+                    var el = document.getElementById('fb2-view');
+                    if (el) el.scrollLeft = 0;
+                    setTimeout(self.updateFb2Pagination, 100);
+                });
+            });
+        },
+        handleResize: function() {
+            if (!this.isEpub) this.updateFb2Pagination();
+        },
+        updateFb2Pagination: function() {
+            var el = document.getElementById('fb2-view');
+            if (el) {
+                this.totalPages = Math.max(1, Math.ceil(el.scrollWidth / el.clientWidth));
+                this.currentPage = Math.round(el.scrollLeft / el.clientWidth) + 1;
+                this.pageInput = this.currentPage;
+            }
+        },
+        goToPage: function() {
+            let p = parseInt(this.pageInput);
+            if (isNaN(p) || p < 1) p = 1;
+            if (p > this.totalPages) p = this.totalPages;
+            this.pageInput = p;
+
+            if (this.isEpub && this.rendition) {
+                // Переход для EPUB
+                let percentage = (p - 1) / Math.max(1, this.totalPages - 1);
+                if (percentage < 0) percentage = 0;
+                if (percentage > 1) percentage = 1;
+                let cfi = this.bookObj.locations.cfiFromPercentage(percentage);
+                if (cfi) this.rendition.display(cfi);
+            } else {
+                // Переход для FB2
+                var el = document.getElementById('fb2-view');
+                if (el) {
+                    el.scrollLeft = (p - 1) * el.clientWidth;
+                    setTimeout(this.updateFb2Pagination, 300);
+                }
+            }
+        },
+        prev: function() { 
+            if (this.isEpub && this.rendition) {
+                this.rendition.prev();
+            } else { 
+                var el = document.getElementById('fb2-view'); 
+                if(el) {
+                    el.scrollLeft -= el.clientWidth; 
+                    setTimeout(this.updateFb2Pagination, 300);
+                }
+            }
+        },
+        next: function() { 
+            if (this.isEpub && this.rendition) {
+                this.rendition.next();
+            } else { 
+                var el = document.getElementById('fb2-view'); 
+                if(el) {
+                    el.scrollLeft += el.clientWidth; 
+                    setTimeout(this.updateFb2Pagination, 300);
+                }
+            }
+        }
+    }
+});
+</script>
+</body>
+</html>
