@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Читалка V5.4 — Постраничное листание и нумерация</title>
+    <title>Читалка V5.5 — Сохранение прогресса</title>
     
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
@@ -26,7 +26,6 @@
         /* Основная область */
         .main { flex-grow: 1; display: flex; flex-direction: column; position: relative; overflow: hidden; }
         .reader-viewport { flex: 1; display: flex; justify-content: center; padding: 20px; overflow: hidden; }
-        /* УВЕЛИЧЕНА ШИРИНА КОНТЕЙНЕРА (было 850px, стало 1300px) */
         .reader-container { width: 100%; max-width: 1300px; height: 100%; background: #FFFFFF; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); position: relative; overflow: hidden; }
 
         /* Контейнеры */
@@ -35,7 +34,7 @@
         .fb2-area {
             width: 100%; height: 100%;
             padding: 40px 60px; line-height: 1.7; font-size: 18px; color: #374151;
-            column-width: 500px; /* Адаптивная ширина колонки для FB2 */
+            column-width: 500px;
             column-gap: 120px;
             overflow-x: auto;
             scroll-behavior: smooth;
@@ -99,14 +98,12 @@ new Vue({
         isEpub: false,
         fb2HTML: '',
         
-        // Данные для нумерации
         currentPage: 1,
         totalPages: 1,
         pageInput: 1
     },
     mounted: function() { 
         this.fetchList(); 
-        // Обновляем количество страниц FB2 при изменении размера окна
         window.addEventListener('resize', this.handleResize);
     },
     beforeDestroy: function() {
@@ -115,7 +112,15 @@ new Vue({
     methods: {
         fetchList: function() {
             var self = this;
-            fetch('list.php?t=' + Date.now()).then(r => r.json()).then(d => { self.books = d; });
+            fetch('list.php?t=' + Date.now()).then(r => r.json()).then(d => { 
+                self.books = d; 
+                
+                // Автоматически открываем последнюю читаемую книгу
+                var lastBook = localStorage.getItem('last_opened_book');
+                if (lastBook && self.books.includes(lastBook) && !self.currentBookName) {
+                    self.openBook(lastBook);
+                }
+            });
         },
         uploadBook: function(e) {
             var self = this;
@@ -130,6 +135,8 @@ new Vue({
         },
         openBook: function(name) {
             this.currentBookName = name;
+            localStorage.setItem('last_opened_book', name); // Сохраняем имя текущей книги
+            
             this.loadingStatus = 'Открываю...';
             this.fb2HTML = '';
             this.currentPage = 1;
@@ -150,22 +157,36 @@ new Vue({
             this.bookObj = ePub('./uploads/' + name);
             this.rendition = this.bookObj.renderTo("epub-area", { width: "100%", height: "100%", flow: "paginated" });
             
-            this.rendition.display().then(() => { 
+            // Получаем сохраненную позицию
+            var savedCfi = localStorage.getItem('reader_progress_' + name);
+            var displayPromise = savedCfi ? this.rendition.display(savedCfi) : this.rendition.display();
+            
+            displayPromise.then(() => { 
                 self.loadingStatus = 'Генерация страниц...';
-                // Генерируем локации для точного подсчета страниц
                 return self.bookObj.locations.generate(1024);
             }).then(() => {
                 self.totalPages = self.bookObj.locations.length() || 1;
                 self.loadingStatus = null;
+                
+                // Обновляем инпут страницы после загрузки
+                if (savedCfi && self.bookObj.locations.length()) {
+                    let percent = self.bookObj.locations.percentageFromCfi(savedCfi);
+                    self.currentPage = Math.max(1, Math.ceil(percent * self.totalPages));
+                    self.pageInput = self.currentPage;
+                }
             });
 
-            // Отслеживаем перелистывание
             this.rendition.on('relocated', function(location) {
                 if (self.bookObj.locations.length()) {
                     let percent = self.bookObj.locations.percentageFromCfi(location.start.cfi);
                     self.currentPage = Math.max(1, Math.ceil(percent * self.totalPages));
                     if (self.currentPage > self.totalPages) self.currentPage = self.totalPages;
                     self.pageInput = self.currentPage;
+                }
+                
+                // Сохраняем позицию в localStorage
+                if (location && location.start && location.start.cfi) {
+                    localStorage.setItem('reader_progress_' + self.currentBookName, location.start.cfi);
                 }
             });
         },
@@ -187,11 +208,27 @@ new Vue({
                 self.fb2HTML = body.innerHTML.replace(/<section/gi, '<div').replace(/<\/section/gi, '</div>');
                 self.loadingStatus = null;
                 
-                // Рассчитываем страницы после рендера HTML
                 self.$nextTick(() => {
                     var el = document.getElementById('fb2-view');
-                    if (el) el.scrollLeft = 0;
-                    setTimeout(self.updateFb2Pagination, 100);
+                    var savedPage = localStorage.getItem('reader_progress_' + name);
+                    
+                    // Ждем рендера колонок браузером
+                    setTimeout(() => {
+                        if (el) {
+                            self.totalPages = Math.max(1, Math.ceil(el.scrollWidth / el.clientWidth));
+                            
+                            // Восстанавливаем позицию
+                            if (savedPage) {
+                                let p = parseInt(savedPage);
+                                if (p > self.totalPages) p = self.totalPages;
+                                self.pageInput = p;
+                                el.scrollLeft = (p - 1) * el.clientWidth;
+                            } else {
+                                el.scrollLeft = 0;
+                            }
+                            self.updateFb2Pagination();
+                        }
+                    }, 150);
                 });
             });
         },
@@ -204,6 +241,11 @@ new Vue({
                 this.totalPages = Math.max(1, Math.ceil(el.scrollWidth / el.clientWidth));
                 this.currentPage = Math.round(el.scrollLeft / el.clientWidth) + 1;
                 this.pageInput = this.currentPage;
+                
+                // Сохраняем страницу FB2 в localStorage
+                if (this.currentBookName) {
+                    localStorage.setItem('reader_progress_' + this.currentBookName, this.currentPage);
+                }
             }
         },
         goToPage: function() {
@@ -213,14 +255,12 @@ new Vue({
             this.pageInput = p;
 
             if (this.isEpub && this.rendition) {
-                // Переход для EPUB
                 let percentage = (p - 1) / Math.max(1, this.totalPages - 1);
                 if (percentage < 0) percentage = 0;
                 if (percentage > 1) percentage = 1;
                 let cfi = this.bookObj.locations.cfiFromPercentage(percentage);
                 if (cfi) this.rendition.display(cfi);
             } else {
-                // Переход для FB2
                 var el = document.getElementById('fb2-view');
                 if (el) {
                     el.scrollLeft = (p - 1) * el.clientWidth;
