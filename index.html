@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Читалка V5.2 — Vue 2.1 Edition</title>
+    
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/epubjs/dist/epub.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/2.1.10/vue.min.js"></script>
+    
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        
+        body { 
+            font-family: 'Inter', sans-serif; 
+            background: #F3F4F6;
+            color: #111827; 
+            height: 100vh;
+            overflow: hidden; 
+        }
+
+        #app {
+            display: flex;
+            height: 100vh;
+            width: 100%;
+        }
+        
+        /* Боковая панель */
+        .sidebar { 
+            width: 300px; 
+            background: #FFFFFF; 
+            border-right: 1px solid #E5E7EB; 
+            padding: 24px; 
+            display: flex; 
+            flex-direction: column; 
+            flex-shrink: 0; 
+            z-index: 10;
+        }
+        
+        .sidebar h2 { font-size: 20px; font-weight: 700; margin-bottom: 20px; }
+        
+        .upload-area { margin-bottom: 20px; }
+        .file-input-label {
+            display: block;
+            width: 100%;
+            padding: 12px;
+            background: #111827;
+            color: #fff;
+            text-align: center;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 14px;
+        }
+        #bookInput { display: none; }
+
+        .book-list { flex-grow: 1; overflow-y: auto; margin-top: 10px; }
+        .book-item { 
+            padding: 12px; border-radius: 10px; cursor: pointer; 
+            background: #F9FAFB; margin-bottom: 8px; font-size: 13px;
+            transition: all 0.2s; border: 1px solid transparent;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .book-item:hover { background: #F3F4F6; }
+        .book-item.active { background: #E5E7EB; border-color: #D1D5DB; font-weight: 600; }
+
+        /* Основная область */
+        .main { 
+            flex-grow: 1; 
+            display: flex; 
+            flex-direction: column; 
+            height: 100vh;
+            position: relative;
+        }
+        
+        .reader-viewport { 
+            flex: 1; 
+            display: flex; 
+            justify-content: center; 
+            padding: 20px;
+            overflow: hidden;
+        }
+
+        .reader-container { 
+            width: 100%; 
+            max-width: 850px; 
+            height: 100%; 
+            background: #FFFFFF; 
+            border-radius: 12px; 
+            box-shadow: 0 4px 20px rgba(0,0,0,0.05);
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Контейнеры для разных форматов */
+        #epub-area { width: 100%; height: 100%; }
+        
+        .fb2-area {
+            width: 100%; height: 100%;
+            overflow-y: auto;
+            padding: 40px 60px;
+            line-height: 1.7;
+            font-size: 18px;
+            color: #374151;
+            text-align: left;
+        }
+        .fb2-area h2 { text-align: center; margin: 30px 0; color: #111827; }
+        .fb2-area p { margin-bottom: 15px; text-indent: 1.5em; }
+
+        /* Элементы управления */
+        .controls { 
+            height: 80px; 
+            background: #FFFFFF; 
+            border-top: 1px solid #E5E7EB;
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            gap: 20px; 
+            flex-shrink: 0;
+        }
+        
+        .nav-btn { 
+            padding: 10px 20px; background: #FFFFFF; color: #111827; 
+            border: 1px solid #D1D5DB; border-radius: 10px; cursor: pointer; 
+            font-size: 14px; font-weight: 600;
+        }
+        .nav-btn:hover { background: #F9FAFB; }
+
+        .loader {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(255,255,255,0.9);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 20; font-weight: 600; color: #6B7280;
+        }
+    </style>
+</head>
+<body>
+
+<div id="app">
+    <div class="sidebar">
+        <h2>Мои книги</h2>
+        <div class="upload-area">
+            <label class="file-input-label">
+                + Загрузить книгу
+                <input type="file" id="bookInput" @change="uploadBook" accept=".epub,.fb2,.zip">
+            </label>
+        </div>
+        
+        <div class="book-list">
+            <div v-if="books.length === 0" style="text-align:center; color:#999; font-size:12px; margin-top:20px;">
+                Библиотека пуста
+            </div>
+            <div v-for="book in books" 
+                 class="book-item" 
+                 :class="{ active: currentBookName === book }" 
+                 @click="openBook(book)">
+                {{ book }}
+            </div>
+        </div>
+    </div>
+
+    <div class="main">
+        <div v-if="loadingStatus" class="loader">{{ loadingStatus }}</div>
+        
+        <div class="reader-viewport">
+            <div class="reader-container">
+                <div v-if="!currentBookName && !loadingStatus" class="loader" style="background:transparent;">
+                    Выберите книгу для чтения
+                </div>
+                
+                <div id="epub-area" v-show="isEpub"></div>
+                
+                <div v-if="!isEpub && fb2HTML" class="fb2-area" v-html="fb2HTML"></div>
+            </div>
+        </div>
+
+        <div class="controls" v-show="isEpub && currentBookName">
+            <button class="nav-btn" @click="prev">← Назад</button>
+            <div style="font-size: 14px; color: #4B5563;">
+                Страница {{ currentPage }} <span style="color:#9CA3AF">из {{ totalPages }}</span>
+            </div>
+            <button class="nav-btn" @click="next">Вперед →</button>
+        </div>
+    </div>
+</div>
+
+<script>
+new Vue({
+    el: '#app',
+    data: {
+        books: [],
+        currentBookName: null,
+        loadingStatus: null,
+        isEpub: false,
+        fb2HTML: '',
+        currentPage: 1,
+        totalPages: '...'
+    },
+    mounted: function() {
+        this.fetchList();
+        this.rendition = null;
+        this.bookObj = null;
+    },
+    methods: {
+        fetchList: function() {
+            var self = this;
+            fetch('list.php?t=' + Date.now())
+                .then(function(r) { return r.json(); })
+                .then(function(data) { self.books = data; });
+        },
+        uploadBook: function(e) {
+            var self = this;
+            var file = e.target.files[0];
+            if (!file) return;
+
+            this.loadingStatus = 'Загрузка на сервер...';
+            var fd = new FormData();
+            fd.append('book', file);
+
+            fetch('upload.php', { method: 'POST', body: fd })
+                .then(function(r) { return r.json(); })
+                .then(function(res) {
+                    self.loadingStatus = null;
+                    if (res.status === 'success') self.fetchList();
+                    else alert('Ошибка: ' + res.message);
+                });
+        },
+        openBook: function(name) {
+            var self = this;
+            this.currentBookName = name;
+            this.loadingStatus = 'Открываю...';
+            this.fb2HTML = '';
+            this.totalPages = '...';
+            this.currentPage = 1;
+            
+            var ext = name.toLowerCase().split('.').pop();
+            this.isEpub = (ext === 'epub');
+
+            // Очистка предыдущей книги
+            if (this.rendition) {
+                this.rendition.destroy();
+                this.rendition = null;
+            }
+            document.getElementById('epub-area').innerHTML = '';
+
+            if (this.isEpub) {
+                this.initEpub(name);
+            } else {
+                this.initFb2(name, ext);
+            }
+        },
+        initEpub: function(name) {
+            var self = this;
+            this.bookObj = ePub('./uploads/' + name);
+            this.rendition = this.bookObj.renderTo("epub-area", {
+                width: "100%",
+                height: "100%",
+                flow: "paginated",
+                manager: "default"
+            });
+
+            this.rendition.display().then(function() {
+                self.loadingStatus = null;
+                // Фоновый расчет страниц
+                self.bookObj.locations.generate(600).then(function() {
+                    self.totalPages = self.bookObj.locations.length();
+                });
+            });
+
+            this.rendition.on("relocated", function(loc) {
+                if (self.bookObj.locations.length() > 0) {
+                    self.currentPage = self.bookObj.locations.locationFromCfi(loc.start.cfi) + 1;
+                }
+            });
+        },
+        initFb2: function(name, ext) {
+            var self = this;
+            fetch('./uploads/' + name)
+                .then(function(r) { return r.arrayBuffer(); })
+                .then(function(buffer) {
+                    // Если это ZIP, распаковываем первый FB2 внутри
+                    if (ext === 'zip') {
+                        return JSZip.loadAsync(buffer).then(function(zip) {
+                            var fb2File = Object.keys(zip.files).find(function(f) { 
+                                return f.toLowerCase().endsWith('.fb2'); 
+                            });
+                            return zip.files[fb2File].async("arraybuffer");
+                        });
+                    }
+                    return buffer;
+                })
+                .then(function(buffer) {
+                    // Определение кодировки (UTF-8 или Win-1251)
+                    var headView = new Uint8Array(buffer.slice(0, 500));
+                    var headStr = new TextDecoder("utf-8").decode(headView).toLowerCase();
+                    var encoding = headStr.includes('windows-1251') ? 'windows-1251' : 'utf-8';
+                    var text = new TextDecoder(encoding).decode(buffer);
+
+                    // Парсинг XML
+                    var parser = new DOMParser();
+                    var xmlDoc = parser.parseFromString(text, "text/xml");
+                    var body = xmlDoc.querySelector("body") || xmlDoc.documentElement;
+
+                    self.fb2HTML = body.innerHTML
+                        .replace(/<title/gi, '<h2').replace(/<\/title/gi, '</h2')
+                        .replace(/<empty-line\/?>/gi, '<br><br>')
+                        .replace(/<section/gi, '<div class="fb2-section"').replace(/<\/section/gi, '</div>');
+                    
+                    self.loadingStatus = null;
+                })
+                .catch(function(e) {
+                    self.loadingStatus = 'Ошибка: ' + e.message;
+                });
+        },
+        prev: function() { if(this.rendition) this.rendition.prev(); },
+        next: function() { if(this.rendition) this.rendition.next(); }
+    }
+});
+</script>
+</body>
+</html>
